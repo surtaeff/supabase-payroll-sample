@@ -1,0 +1,22 @@
+{
+  "imports": {
+    "@std/assert": "jsr:@std/assert@^1.0.0",
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@^2.45.0"
+  },
+  "tasks": {
+    "test": "deno test supabase/functions/tests/*-test.ts",
+    "check": "deno check supabase/functions/payroll-export/index.ts supabase/functions/tests/*-test.ts",
+    "test:db": "./scripts/test-db.sh"
+  },
+  "fmt": {
+    "lineWidth": 110,
+    "include": [
+      "supabase/functions"
+    ]
+  },
+  "lint": {
+    "include": [
+      "supabase/functions"
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  edge-functions:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno fmt --check
+      - run: deno lint
+      - run: deno task check
+      - run: deno task test
+
+  database:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pgTAP for the preinstalled Postgres
+        run: |
+          PG=$(ls /usr/lib/postgresql | sort -n | tail -1)
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "postgresql-$PG-pgtap"
+          echo "/usr/lib/postgresql/$PG/bin" >> "$GITHUB_PATH"
+      - run: ./scripts/test-db.sh

@@ -1,0 +1,13 @@
+# Only the settings this sample depends on; everything else uses CLI defaults.
+project_id = "payroll-sample"
+
+[db]
+major_version = 17
+
+[storage.buckets.payroll-exports]
+public = false
+allowed_mime_types = ["text/csv"]
+file_size_limit = "5MiB"
+
+[functions.payroll-export]
+verify_jwt = true
