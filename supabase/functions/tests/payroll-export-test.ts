@@ -1,6 +1,7 @@
-import { assertEquals, assertMatch } from "@std/assert";
+import { assertEquals, assertMatch, assertThrows } from "@std/assert";
 import { createHandler, type Deps, DomainError, mapDbError } from "../payroll-export/handler.ts";
 
+const OPTIONS = { allowedOrigin: "https://office.example.test" };
 const PERIOD_ID = "6f1c2a9e-4b7d-4c1e-9a2f-0d3b5e7a9c11";
 
 /** In-memory fake that records calls, so tests can assert on side effects. */
@@ -52,7 +53,7 @@ function post(body: unknown, auth = "Bearer token"): Request {
 
 Deno.test("happy path: lock, upload, finalize, in that order", async () => {
   const { deps, calls, uploads } = fakeDeps();
-  const res = await createHandler(() => deps)(post({ period_id: PERIOD_ID }));
+  const res = await createHandler(() => deps, OPTIONS)(post({ period_id: PERIOD_ID }));
 
   assertEquals(res.status, 200);
   assertEquals(calls, ["lock", "upload", "finalize"]);
@@ -66,17 +67,18 @@ Deno.test("happy path: lock, upload, finalize, in that order", async () => {
 Deno.test("a retry produces the same file path and checksum", async () => {
   const first = fakeDeps();
   const second = fakeDeps();
-  const a = await (await createHandler(() => first.deps)(post({ period_id: PERIOD_ID }))).json();
-  const b = await (await createHandler(() => second.deps)(post({ period_id: PERIOD_ID }))).json();
+  const a = await (await createHandler(() => first.deps, OPTIONS)(post({ period_id: PERIOD_ID }))).json();
+  const b = await (await createHandler(() => second.deps, OPTIONS)(post({ period_id: PERIOD_ID }))).json();
   assertEquals(a.export.storagePath, b.export.storagePath);
 });
 
 Deno.test("request validation", async (t) => {
-  const handler = createHandler(() => fakeDeps().deps);
+  const handler = createHandler(() => fakeDeps().deps, OPTIONS);
 
   await t.step("OPTIONS answers the CORS preflight", async () => {
     const res = await handler(new Request("http://localhost/", { method: "OPTIONS" }));
     assertEquals(res.status, 204);
+    assertEquals(res.headers.get("Access-Control-Allow-Origin"), "https://office.example.test");
   });
   await t.step("GET is not allowed", async () => {
     assertEquals((await handler(new Request("http://localhost/"))).status, 405);
@@ -95,7 +97,7 @@ Deno.test("request validation", async (t) => {
 Deno.test("unknown user is 401, technician is 403, nothing is locked", async () => {
   for (const [caller, status] of [[null, 401], [{ employeeId: "e1", role: "technician" }, 403]] as const) {
     const { deps, calls } = fakeDeps({ getCaller: () => Promise.resolve(caller) });
-    const res = await createHandler(() => deps)(post({ period_id: PERIOD_ID }));
+    const res = await createHandler(() => deps, OPTIONS)(post({ period_id: PERIOD_ID }));
     assertEquals(res.status, status);
     assertEquals(calls, []);
   }
@@ -105,7 +107,7 @@ Deno.test("unapproved entries stop the export before anything is uploaded", asyn
   const { deps, calls } = fakeDeps({
     lockPeriod: () => Promise.reject(mapDbError({ code: "PR002", message: "3 entries are not approved" })),
   });
-  const res = await createHandler(() => deps)(post({ period_id: PERIOD_ID }));
+  const res = await createHandler(() => deps, OPTIONS)(post({ period_id: PERIOD_ID }));
   assertEquals(res.status, 409);
   assertEquals((await res.json()).error, "unapproved_entries");
   assertEquals(calls, []);
@@ -115,7 +117,11 @@ Deno.test("database error codes map to HTTP statuses", async () => {
   const cases: Array<[string, number]> = [["42501", 403], ["P0002", 404], ["PR001", 409]];
   for (const [code, status] of cases) {
     const { deps } = fakeDeps({ lockPeriod: () => Promise.reject(mapDbError({ code, message: code })) });
-    assertEquals((await createHandler(() => deps)(post({ period_id: PERIOD_ID }))).status, status, code);
+    assertEquals(
+      (await createHandler(() => deps, OPTIONS)(post({ period_id: PERIOD_ID }))).status,
+      status,
+      code,
+    );
   }
 });
 
@@ -124,7 +130,7 @@ Deno.test("unexpected failures are 500 without leaking details", async () => {
   const originalError = console.error;
   console.error = () => {};
   try {
-    const res = await createHandler(() => deps)(post({ period_id: PERIOD_ID }));
+    const res = await createHandler(() => deps, OPTIONS)(post({ period_id: PERIOD_ID }));
     assertEquals(res.status, 500);
     assertEquals(await res.json(), { error: "internal_error" });
   } finally {
@@ -150,10 +156,23 @@ Deno.test("inconsistent payroll data is 422", async () => {
         pieceWork: [],
       }),
   });
-  assertEquals((await createHandler(() => deps)(post({ period_id: PERIOD_ID }))).status, 422);
+  assertEquals((await createHandler(() => deps, OPTIONS)(post({ period_id: PERIOD_ID }))).status, 422);
 });
 
 Deno.test("mapDbError keeps unknown errors generic", () => {
   assertEquals(mapDbError({ code: "PR002", message: "x" }) instanceof DomainError, true);
   assertEquals(mapDbError({ code: "23505", message: "dup" }) instanceof DomainError, false);
+});
+
+Deno.test("every response carries the configured origin, never a wildcard", async () => {
+  const { deps } = fakeDeps();
+  const res = await createHandler(() => deps, OPTIONS)(post({ period_id: PERIOD_ID }));
+  assertEquals(res.headers.get("Access-Control-Allow-Origin"), "https://office.example.test");
+  assertEquals(res.headers.get("Vary"), "Origin");
+});
+
+Deno.test("a missing or wildcard origin stops the function at startup", () => {
+  for (const allowedOrigin of ["", "*"]) {
+    assertThrows(() => createHandler(() => fakeDeps().deps, { allowedOrigin }), Error, "allowedOrigin");
+  }
 });

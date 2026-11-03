@@ -40,12 +40,17 @@ period: open  -> locked (all entries decided) -> exported (file stored, checksum
   `finalize_payroll_export`). Direct `UPDATE` on periods and any write on exports are
   revoked. Custom SQLSTATE codes (`PR001` to `PR004`) let the API return precise errors.
 
-**RLS** (following the Supabase RLS performance guide)
+**RLS** (following the Supabase RLS performance guide and database linter)
 
 - Technicians see and edit only their own drafts and can submit them. Office approves,
   and only in its own name. Admin manages master data. Anon gets nothing.
+- Exactly one permissive policy per table, role and action, with the role cases joined
+  by `or` (lint `multiple_permissive_policies`).
 - Role lookups are `security definer` helpers in a non-exposed `private` schema with
-  `search_path = ''`, called as `(select ...)` so they run once per statement.
+  `search_path = ''`, called as `(select ...)` so they run once per statement
+  (lint `auth_rls_initplan`).
+- Both lint rules are checked by a pgTAP test against `pg_policies`, so a policy that
+  breaks them fails CI.
 - Every policy is `to authenticated`; queries also filter explicitly so the planner can
   use indexes instead of relying on RLS for filtering.
 
@@ -54,8 +59,12 @@ period: open  -> locked (all entries decided) -> exported (file stored, checksum
 - Thin `index.ts`; the handler gets its dependencies injected (`Deps`), so HTTP
   behaviour is tested without a network or database. Calculation and CSV are pure
   modules in `_shared/`.
+- The caller is identified with `auth.getClaims()`: the JWT is verified locally against
+  the project's signing keys, without a call to Auth per request.
 - Database reads run with the caller's JWT, so RLS applies. The service role key is
   used for one thing only: writing the file to the private bucket.
+- CORS allows only the office app's origin (`ALLOWED_ORIGIN` secret). A missing value or
+  `*` stops the function at startup.
 - Every step is safe to retry: locking a locked period is a no-op, the file path
   contains the SHA-256 of its content, and finalizing twice with the same checksum
   returns the first record. If a run fails halfway, the office just runs it again.
@@ -73,9 +82,9 @@ period: open  -> locked (all entries decided) -> exported (file stored, checksum
 ## Tests
 
 ```bash
-deno task test        # 25 Deno tests: rules, rounding, DST, CSV format, HTTP handler
+deno task test        # 27 Deno tests: rules, rounding, DST, CSV format, HTTP handler, CORS
 deno task check       # type check, including the supabase-js adapter
-deno task test:db     # 42 pgTAP tests on a throwaway Postgres (needs Postgres 14+ and pgTAP)
+deno task test:db     # 44 pgTAP tests on a throwaway Postgres (needs Postgres 14+ and pgTAP)
 ```
 
 With the Supabase CLI the database tests run as usual: `supabase db reset && supabase test db`.
@@ -86,12 +95,13 @@ The pgTAP suites cover:
 
 - `01_constraints`: overlaps, invalid durations and breaks, approval consistency, Berlin
   work date, period overlap, frozen periods, piece rate validity.
-- `02_rls`: each role through the API roles (`anon`, `authenticated` with JWT claims),
-  `policies_are`, own vs colleague's rows, self-approval, the full
-  open -> locked -> exported flow with retries and refusals.
+- `02_rls`: the two linter rules above, `policies_are`, each role through the API roles
+  (`anon`, `authenticated` with JWT claims), own vs colleague's rows, self-approval, the
+  full open -> locked -> exported flow with retries and refusals.
 
-The suites were checked against deliberate mistakes: an extra `using (true)` policy and
-an off-by-one in the break threshold both turn the run red.
+The suites were checked against deliberate mistakes: an extra `using (true)` policy, a
+duplicate permissive policy, an unwrapped `auth.uid()` and an off-by-one in the break
+threshold all turn the run red.
 
 ## Not included on purpose
 

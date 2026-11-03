@@ -85,19 +85,27 @@ export function mapDbError(error: { code?: string; message?: string }): Error {
   }
 }
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+export interface HandlerOptions {
+  /** The office app's origin, e.g. https://office.example.com. Never "*". */
+  allowedOrigin: string;
+}
+
+function corsHeaders(allowedOrigin: string): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Vary": "Origin",
+  };
+}
 
 const HOURS_WAGE_TYPE = "1000";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function json(status: number, body: unknown): Response {
+function json(status: number, body: unknown, cors: Record<string, string>): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+    headers: { ...cors, "Content-Type": "application/json" },
   });
 }
 
@@ -106,30 +114,36 @@ async function sha256Hex(content: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export function createHandler(depsFor: (authorization: string) => Deps) {
+export function createHandler(depsFor: (authorization: string) => Deps, options: HandlerOptions) {
+  if (!options.allowedOrigin || options.allowedOrigin === "*") {
+    throw new Error("allowedOrigin must be a concrete origin");
+  }
+  const cors = corsHeaders(options.allowedOrigin);
+  const reply = (status: number, body: unknown) => json(status, body, cors);
+
   return async (req: Request): Promise<Response> => {
-    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
-    if (req.method !== "POST") return json(405, { error: "method_not_allowed" });
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+    if (req.method !== "POST") return reply(405, { error: "method_not_allowed" });
 
     const authorization = req.headers.get("Authorization");
-    if (!authorization?.startsWith("Bearer ")) return json(401, { error: "unauthorized" });
+    if (!authorization?.startsWith("Bearer ")) return reply(401, { error: "unauthorized" });
 
     let periodId: unknown;
     try {
       periodId = (await req.json())?.period_id;
     } catch {
-      return json(400, { error: "invalid_json" });
+      return reply(400, { error: "invalid_json" });
     }
     if (typeof periodId !== "string" || !UUID.test(periodId)) {
-      return json(400, { error: "period_id must be a uuid" });
+      return reply(400, { error: "period_id must be a uuid" });
     }
 
     const deps = depsFor(authorization);
     try {
       const caller = await deps.getCaller();
-      if (!caller) return json(401, { error: "unauthorized" });
+      if (!caller) return reply(401, { error: "unauthorized" });
       // Checked again inside the RPCs; this only gives a clean early answer.
-      if (caller.role === "technician") return json(403, { error: "forbidden" });
+      if (caller.role === "technician") return reply(403, { error: "forbidden" });
 
       await deps.lockPeriod(periodId);
       const data = await deps.loadPeriodData(periodId);
@@ -146,16 +160,16 @@ export function createHandler(depsFor: (authorization: string) => Deps) {
         lineCount: lines.length,
       });
 
-      return json(200, { export: record, warnings });
+      return reply(200, { export: record, warnings });
     } catch (error) {
       if (error instanceof DomainError) {
-        return json(STATUS[error.code], { error: error.code, message: error.message });
+        return reply(STATUS[error.code], { error: error.code, message: error.message });
       }
       if (error instanceof PayrollInputError) {
-        return json(422, { error: "invalid_payroll_data", message: error.message });
+        return reply(422, { error: "invalid_payroll_data", message: error.message });
       }
       console.error("payroll-export failed", { periodId, error });
-      return json(500, { error: "internal_error" });
+      return reply(500, { error: "internal_error" });
     }
   };
 }

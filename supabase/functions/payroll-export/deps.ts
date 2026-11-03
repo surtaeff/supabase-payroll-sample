@@ -26,12 +26,18 @@ export function supabaseDeps(authorization: string): Deps {
 
   return {
     async getCaller(): Promise<Caller | null> {
-      const { data: auth } = await db.auth.getUser(authorization.replace(/^Bearer /, ""));
-      if (!auth.user) return null;
+      // getClaims verifies the JWT locally against the project's asymmetric signing
+      // keys (cached JWKS), so no round trip to Auth per call. Projects still on the
+      // legacy symmetric secret fall back to an Auth request automatically.
+      const { data: auth, error: authError } = await db.auth.getClaims(
+        authorization.replace(/^Bearer /, ""),
+      );
+      const userId = auth?.claims.sub;
+      if (authError || !userId) return null;
       const { data, error } = await db
         .from("employees")
         .select("id, role")
-        .eq("user_id", auth.user.id)
+        .eq("user_id", userId)
         .eq("active", true)
         .maybeSingle();
       if (error) throw mapDbError(error);

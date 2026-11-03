@@ -2,7 +2,7 @@
 -- "as <user>" = set local role authenticated + JWT claims, like PostgREST does.
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(27);
+select plan(29);
 
 -- Fixture (as owner) -------------------------------------------------------
 
@@ -29,9 +29,33 @@ insert into public.time_entries (id, employee_id, started_at, ended_at, status) 
 -- Policies exist as designed (Supabase docs: policies_are) ----------------
 
 select policies_are('public', 'time_entries', array[
-  'time_entries_select', 'time_entries_own_insert', 'time_entries_own_update',
-  'time_entries_own_delete', 'time_entries_office_all'
+  'time_entries_select', 'time_entries_insert', 'time_entries_update', 'time_entries_delete'
 ]);
+
+-- Supabase lint multiple_permissive_policies: Postgres evaluates every permissive
+-- policy for a row, so each table, role and action gets exactly one.
+select is_empty(
+  $$select p.tablename, c.cmd, r.role
+    from pg_policies p
+    cross join lateral unnest(
+      case when p.cmd = 'ALL' then array['SELECT', 'INSERT', 'UPDATE', 'DELETE'] else array[p.cmd] end
+    ) as c(cmd)
+    cross join lateral unnest(p.roles) as r(role)
+    where p.schemaname = 'public' and p.permissive = 'PERMISSIVE'
+    group by p.tablename, c.cmd, r.role
+    having count(*) > 1$$,
+  'one permissive policy per table, role and action'
+);
+
+-- Supabase lint auth_rls_initplan: auth and helper calls must be wrapped in a
+-- subquery so they run once per statement, not once per row.
+select is_empty(
+  $$select p.tablename, p.policyname
+    from pg_policies p
+    where p.schemaname = 'public'
+      and concat(p.qual, ' ', p.with_check) ~ '(?<!SELECT )(auth|private)\.[a-z_]+\('$$,
+  'auth.* and private.* calls in policies are wrapped in (select ...)'
+);
 
 -- anon ----------------------------------------------------------------------
 

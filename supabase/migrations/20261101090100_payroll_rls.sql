@@ -6,8 +6,12 @@
 -- * admin:      everything office can do, plus employees, periods and piece rates.
 -- * anon:       nothing.
 --
--- Helper calls are wrapped in (select ...) so Postgres evaluates them once per
--- statement instead of once per row.
+-- Following the Supabase RLS performance guide and database linter:
+-- * helper calls are wrapped in (select ...) so Postgres evaluates them once per
+--   statement instead of once per row (lint auth_rls_initplan);
+-- * exactly one permissive policy per table, role and action, with the role cases
+--   joined by OR inside it (lint multiple_permissive_policies).
+-- Both rules are enforced by a test in supabase/tests/database/02_rls.test.sql.
 
 -- ---------------------------------------------------------------------------
 -- Helpers (schema "private" is not exposed through the API)
@@ -83,10 +87,18 @@ create policy employees_select on public.employees
     or (select private.has_role('office'))
   );
 
-create policy employees_admin_write on public.employees
-  for all to authenticated
+create policy employees_insert on public.employees
+  for insert to authenticated
+  with check ((select private.has_role('admin')));
+
+create policy employees_update on public.employees
+  for update to authenticated
   using ((select private.has_role('admin')))
   with check ((select private.has_role('admin')));
+
+create policy employees_delete on public.employees
+  for delete to authenticated
+  using ((select private.has_role('admin')));
 
 -- ---------------------------------------------------------------------------
 -- payroll_periods: everyone signed in may read (the app shows if a month is closed)
@@ -96,59 +108,55 @@ create policy payroll_periods_select on public.payroll_periods
   for select to authenticated
   using (true);
 
-create policy payroll_periods_admin_insert on public.payroll_periods
+create policy payroll_periods_insert on public.payroll_periods
   for insert to authenticated
   with check ((select private.has_role('admin')) and status = 'open');
 
-create policy payroll_periods_admin_delete on public.payroll_periods
+create policy payroll_periods_delete on public.payroll_periods
   for delete to authenticated
   using ((select private.has_role('admin')) and status = 'open');
 
 -- ---------------------------------------------------------------------------
 -- time_entries
+--
+-- Technician: own rows, edit only while draft, may move draft -> submitted.
+-- Office: all rows, approves only in its own name.
+-- approved_* stay null for technicians because of the status check constraint.
 -- ---------------------------------------------------------------------------
 
 create policy time_entries_select on public.time_entries
   for select to authenticated
-  using (
-    employee_id = (select private.current_employee_id())
-    or (select private.has_role('office'))
-  );
+  using (employee_id = (select private.current_employee_id()) or (select private.has_role('office')));
 
-create policy time_entries_own_insert on public.time_entries
+create policy time_entries_insert on public.time_entries
   for insert to authenticated
   with check (
-    employee_id = (select private.current_employee_id())
-    and status in ('draft', 'submitted')
+    (employee_id = (select private.current_employee_id()) and status in ('draft', 'submitted'))
+    or (
+      (select private.has_role('office'))
+      and (status <> 'approved' or approved_by = (select private.current_employee_id()))
+    )
   );
 
--- A technician may change an entry only while it is a draft, and may only move it
--- to draft or submitted. approved_* stay null because of the status check constraint.
-create policy time_entries_own_update on public.time_entries
+create policy time_entries_update on public.time_entries
   for update to authenticated
   using (
-    employee_id = (select private.current_employee_id())
-    and status = 'draft'
+    (employee_id = (select private.current_employee_id()) and status = 'draft')
+    or (select private.has_role('office'))
   )
   with check (
-    employee_id = (select private.current_employee_id())
-    and status in ('draft', 'submitted')
+    (employee_id = (select private.current_employee_id()) and status in ('draft', 'submitted'))
+    or (
+      (select private.has_role('office'))
+      and (status <> 'approved' or approved_by = (select private.current_employee_id()))
+    )
   );
 
-create policy time_entries_own_delete on public.time_entries
+create policy time_entries_delete on public.time_entries
   for delete to authenticated
   using (
-    employee_id = (select private.current_employee_id())
-    and status = 'draft'
-  );
-
--- Office staff approve in their own name only.
-create policy time_entries_office_all on public.time_entries
-  for all to authenticated
-  using ((select private.has_role('office')))
-  with check (
-    (select private.has_role('office'))
-    and (status <> 'approved' or approved_by = (select private.current_employee_id()))
+    (employee_id = (select private.current_employee_id()) and status = 'draft')
+    or (select private.has_role('office'))
   );
 
 -- ---------------------------------------------------------------------------
@@ -159,10 +167,18 @@ create policy piece_rates_select on public.piece_rates
   for select to authenticated
   using (true);
 
-create policy piece_rates_admin_write on public.piece_rates
-  for all to authenticated
+create policy piece_rates_insert on public.piece_rates
+  for insert to authenticated
+  with check ((select private.has_role('admin')));
+
+create policy piece_rates_update on public.piece_rates
+  for update to authenticated
   using ((select private.has_role('admin')))
   with check ((select private.has_role('admin')));
+
+create policy piece_rates_delete on public.piece_rates
+  for delete to authenticated
+  using ((select private.has_role('admin')));
 
 -- ---------------------------------------------------------------------------
 -- piece_work_entries (same rules as time_entries)
@@ -170,42 +186,37 @@ create policy piece_rates_admin_write on public.piece_rates
 
 create policy piece_work_select on public.piece_work_entries
   for select to authenticated
-  using (
-    employee_id = (select private.current_employee_id())
-    or (select private.has_role('office'))
-  );
+  using (employee_id = (select private.current_employee_id()) or (select private.has_role('office')));
 
-create policy piece_work_own_insert on public.piece_work_entries
+create policy piece_work_insert on public.piece_work_entries
   for insert to authenticated
   with check (
-    employee_id = (select private.current_employee_id())
-    and status in ('draft', 'submitted')
+    (employee_id = (select private.current_employee_id()) and status in ('draft', 'submitted'))
+    or (
+      (select private.has_role('office'))
+      and (status <> 'approved' or approved_by = (select private.current_employee_id()))
+    )
   );
 
-create policy piece_work_own_update on public.piece_work_entries
+create policy piece_work_update on public.piece_work_entries
   for update to authenticated
   using (
-    employee_id = (select private.current_employee_id())
-    and status = 'draft'
+    (employee_id = (select private.current_employee_id()) and status = 'draft')
+    or (select private.has_role('office'))
   )
   with check (
-    employee_id = (select private.current_employee_id())
-    and status in ('draft', 'submitted')
+    (employee_id = (select private.current_employee_id()) and status in ('draft', 'submitted'))
+    or (
+      (select private.has_role('office'))
+      and (status <> 'approved' or approved_by = (select private.current_employee_id()))
+    )
   );
 
-create policy piece_work_own_delete on public.piece_work_entries
+create policy piece_work_delete on public.piece_work_entries
   for delete to authenticated
   using (
-    employee_id = (select private.current_employee_id())
-    and status = 'draft'
-  );
-
-create policy piece_work_office_all on public.piece_work_entries
-  for all to authenticated
-  using ((select private.has_role('office')))
-  with check (
-    (select private.has_role('office'))
-    and (status <> 'approved' or approved_by = (select private.current_employee_id()))
+    (employee_id = (select private.current_employee_id()) and status = 'draft')
+    or (select private.has_role('office'))
   );
 
 -- ---------------------------------------------------------------------------
